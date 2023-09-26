@@ -22,10 +22,23 @@ func main() {
 		os.Exit(1)
 	}
 
+	// isolate process
+	err = isolateProcess()
+	if err != nil {
+		fmt.Printf("Error isolating process: %v\n", err)
+		os.Exit(1)
+	}
+
 	cmd := exec.Command(command, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
+
+	// we can also create new namespaces for the process
+	// cmd.SysProcAttr = &syscall.SysProcAttr{
+	// 	Cloneflags: syscall.CLONE_NEWUTS | syscall.CLONE_NEWPID | syscall.CLONE_NEWNS,
+	// }
+	// instead of using unshare we can also use clone
 
 	err = cmd.Run()
 	if err != nil {
@@ -36,6 +49,14 @@ func main() {
 		os.Exit(1)
 	}
 
+}
+
+func isolateProcess() error {
+	// adding addtional namespace i.e., pid namespace, UTS namespace, mount namespace for more isolation
+	if syscall.Unshare(syscall.CLONE_NEWUTS|syscall.CLONE_NEWPID|syscall.CLONE_NEWNS) != nil {
+		return fmt.Errorf("Error unshareing")
+	}
+	return nil
 }
 
 func isolateFileSystem(binaryPath string) error {
