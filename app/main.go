@@ -1,22 +1,272 @@
 package main
 
 import (
+	"archive/tar"
+	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
+	"time"
 )
+
+var httpClient = &http.Client{
+	Timeout: 10 * time.Second,
+}
+
+// type ManifestResponse struct {
+// 	SchemaVersion int    `json:"schemaVersion"`
+// 	MediaType     string `json:"mediaType"`
+// 	Config        struct {
+// 		MediaType string `json:"mediaType"`
+// 		Size      int    `json:"size"`
+// 		Digest    string `json:"digest"`
+// 	} `json:"config"`
+// 	Layers []struct {
+// 		MediaType string `json:"mediaType"`
+// 		Size      int    `json:"size"`
+// 		Digest    string `json:"digest"`
+// 	} `json:"layers"`
+// }
+
+type ManifestResponse struct {
+	Manifests     []Manifests `json:"manifests"`
+	MediaType     string      `json:"mediaType"`
+	SchemaVersion int         `json:"schemaVersion"`
+}
+type Platform struct {
+	Architecture string `json:"architecture"`
+	Os           string `json:"os"`
+}
+type Platform0 struct {
+	Architecture string `json:"architecture"`
+	Os           string `json:"os"`
+	Variant      string `json:"variant"`
+}
+type Platform1 struct {
+	Architecture string `json:"architecture"`
+	Os           string `json:"os"`
+	Variant      string `json:"variant"`
+}
+type Manifests struct {
+	Digest    string    `json:"digest"`
+	MediaType string    `json:"mediaType"`
+	Platform  Platform  `json:"platform,omitempty"`
+	Size      int       `json:"size"`
+	Platform0 Platform0 `json:"platform,omitempty"`
+	Platform1 Platform1 `json:"platform,omitempty"`
+}
+
+type TokenResponse struct {
+	Token       string    `json:"token"`
+	AccessToken string    `json:"access_token"`
+	ExpiresIn   int       `json:"expires_in"`
+	IssuedAt    time.Time `json:"issued_at"`
+}
+
+const (
+	getTokenURL       = "https://auth.docker.io/token?service=registry.docker.io&scope=repository:%s:pull"
+	getManifestURL    = "https://registry.hub.docker.com/v2/library/%s/manifests/%s"
+	getLayerURL       = "https://registry.hub.docker.com/v2/library/%s/blobs/%s"
+	contentTypeHeader = "application/vnd.docker.distribution.manifest.v2+json"
+)
+
+// This function is used to get the token from docker hub
+func getToken(image string) (string, error) {
+	resp, err := httpClient.Get(fmt.Sprintf(getTokenURL, image))
+	if err != nil {
+		return "", err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("Error getting token: %v", resp.Status)
+	}
+	defer resp.Body.Close()
+
+	var tokenResponse TokenResponse
+	err = json.NewDecoder(resp.Body).Decode(&tokenResponse)
+	if err != nil {
+		return "", err
+	}
+
+	return tokenResponse.Token, nil
+}
+
+// This function is used to get the manifest from docker hub
+func getManifest(token, image, tag string) (*ManifestResponse, error) {
+	req, err := http.NewRequest("GET", fmt.Sprintf(getManifestURL, image, tag), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
+	req.Header.Set("Accept", contentTypeHeader)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Error getting manifest: %v", resp.Status)
+	}
+
+	defer resp.Body.Close()
+	bytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var manifestResponse ManifestResponse
+	err = json.Unmarshal(bytes, &manifestResponse)
+	if err != nil {
+		return nil, err
+	}
+
+	return &manifestResponse, nil
+}
+
+// The below function will pull the first layer from manifest response and extract it to a tar file
+func pullLayer(token, image, digest string) (string, error) {
+	req, err := http.NewRequest("GET", fmt.Sprintf(getLayerURL, image, digest), nil)
+	if err != nil {
+		fmt.Printf("Error creating request: %v\n", err)
+		return "", err
+	}
+
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		fmt.Printf("Error sending request: %v\n", err)
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("Error getting layer: %v\n", resp.Status)
+		return "", fmt.Errorf("Error getting layer: %v", resp.Status)
+	}
+	defer resp.Body.Close()
+
+	// saving the layer to file
+	layerFile, err := os.Create(fmt.Sprintf("%s.tar.gz", digest[7:]))
+	if err != nil {
+		fmt.Printf("Error creating file: %v\n", err)
+		return "", err
+	}
+	defer layerFile.Close()
+	_, err = io.Copy(layerFile, resp.Body)
+	if err != nil {
+		fmt.Printf("Error copying file: %v\n", err)
+		return "", err
+	}
+
+	return layerFile.Name(), nil
+}
+
+// The below function will extract the tar file from src to directory dest
+func extractTar(src, dest string) error {
+	cmd := exec.Command("tar", "-xzf", src, "-C", dest)
+	cmd.Stderr = os.Stderr
+	cmd.Stdout = os.Stdout
+	err := cmd.Run()
+	if err != nil {
+		fmt.Println("Error while applying layer: ", err)
+		os.Exit(1)
+	}
+	return nil
+}
+
+// The below function will extract image name and tag from the image string
+// example: ubuntu:latest will return "libary/ubuntu" and "latest"
+func parseImage(image string) (string, string) {
+	imageParts := strings.Split(image, ":")
+	if len(imageParts) == 1 {
+		return imageParts[0], "latest"
+	}
+	return imageParts[0], imageParts[1]
+}
+
+func verifyTarFile(tarFile string) error {
+	file, err := os.Open(tarFile)
+	if err != nil {
+		return fmt.Errorf("Error opening tar file: %v", err)
+	}
+	defer file.Close()
+
+	tarReader := tar.NewReader(file)
+
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("Error reading tar header: %v", err)
+		}
+
+		if header.Typeflag != tar.TypeDir && header.Typeflag != tar.TypeReg {
+			return fmt.Errorf("Invalid file type in tar file: %v", header.Typeflag)
+		}
+	}
+
+	return nil
+}
 
 // Usage: your_docker.sh run <image> <command> <arg1> <arg2> ...
 func main() {
 	command := os.Args[3]
 	args := os.Args[4:len(os.Args)]
+	imageName := os.Args[2]
 
+	// creating a new temporary directory
+	tempDir, err := os.MkdirTemp("", "my-docker")
+	if err != nil {
+		fmt.Printf("Error creating temporary directory: %v\n", err)
+		os.Exit(1)
+	}
+	defer os.RemoveAll(tempDir) // clean up
+
+	// parse image and tag
+	image, tag := parseImage(imageName)
+
+	// get token
+	token, err := getToken(fmt.Sprintf("library/%s", image))
+	if err != nil {
+		fmt.Printf("Error getting token: %v\n", err)
+		os.Exit(1)
+	}
+	// get manifest
+	manifest, err := getManifest(token, image, tag)
+	if err != nil {
+		fmt.Printf("Error getting manifest: %v\n", err)
+		os.Exit(1)
+	}
+	// pull layer
+	layerNames := []string{}
+
+	for _, manifest := range manifest.Manifests {
+		layerName, err := pullLayer(token, image, manifest.Digest)
+		if err != nil {
+			fmt.Printf("Error pulling layer: %v\n", err)
+			os.Exit(1)
+		}
+		layerNames = append(layerNames, layerName)
+	}
+	// extract layer
+	for _, layerName := range layerNames {
+		err := verifyTarFile(layerName)
+		if err != nil {
+			fmt.Printf("Error verifying tar file: %v\n", err)
+			os.Exit(1)
+		}
+		err = extractTar(layerName, tempDir)
+		if err != nil {
+			fmt.Printf("Error extracting layer: %v\n", err)
+			os.Exit(1)
+		}
+	}
 	// isolate file system
-	err := isolateFileSystem(command)
+	err = isolateFileSystem(tempDir, command)
 	if err != nil {
 		fmt.Printf("Error isolating file system: %v\n", err)
 		os.Exit(1)
@@ -59,19 +309,11 @@ func isolateProcess() error {
 	return nil
 }
 
-func isolateFileSystem(binaryPath string) error {
-	// creating a new temporary directory
-	tempDir, err := ioutil.TempDir("", "my-docker")
-	if err != nil {
-		fmt.Printf("Error creating temporary directory: %v\n", err)
-		return err
-	}
-	defer os.RemoveAll(tempDir) // clean up
-
+func isolateFileSystem(tempDir, binaryPath string) error {
 	// now we copy the binary to the temporary directory
 	destinationPath := filepath.Join(tempDir, binaryPath)
 
-	err = os.MkdirAll(filepath.Dir(destinationPath), 0600) // 0600 means only the owner can read/write
+	err := os.MkdirAll(filepath.Dir(destinationPath), 0600) // 0600 means only the owner can read/write
 	if err != nil {
 		fmt.Printf("Error creating directory: %v\n", err)
 		return err
