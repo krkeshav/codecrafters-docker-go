@@ -221,7 +221,7 @@ func main() {
 		}
 	}
 	// isolate file system
-	err = isolateFileSystem(tempDir, command)
+	err = isolateFileSystem(tempDir)
 	if err != nil {
 		fmt.Printf("Error isolating file system: %v\n", err)
 		os.Exit(1)
@@ -264,7 +264,18 @@ func isolateProcess() error {
 	return nil
 }
 
-func isolateFileSystem(tempDir, binaryPath string) error {
+func isolateFileSystem(tempDir string) error {
+	// now we chroot into the temporary directory
+	err := syscall.Chroot(tempDir)
+	if err != nil {
+		fmt.Printf("Error chrooting: %v\n", err)
+		return err
+	}
+	return nil
+}
+
+// This is for previous stages of the project
+func isolateFileSystemWithBinary(tempDir, binaryPath string) error {
 	// now we copy the binary to the temporary directory
 	destinationPath := filepath.Join(tempDir, binaryPath)
 
