@@ -1,7 +1,6 @@
 package main
 
 import (
-	"archive/tar"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -34,31 +33,18 @@ var httpClient = &http.Client{
 // }
 
 type ManifestResponse struct {
-	Manifests     []Manifests `json:"manifests"`
-	MediaType     string      `json:"mediaType"`
-	SchemaVersion int         `json:"schemaVersion"`
-}
-type Platform struct {
-	Architecture string `json:"architecture"`
-	Os           string `json:"os"`
-}
-type Platform0 struct {
-	Architecture string `json:"architecture"`
-	Os           string `json:"os"`
-	Variant      string `json:"variant"`
-}
-type Platform1 struct {
-	Architecture string `json:"architecture"`
-	Os           string `json:"os"`
-	Variant      string `json:"variant"`
-}
-type Manifests struct {
-	Digest    string    `json:"digest"`
-	MediaType string    `json:"mediaType"`
-	Platform  Platform  `json:"platform,omitempty"`
-	Size      int       `json:"size"`
-	Platform0 Platform0 `json:"platform,omitempty"`
-	Platform1 Platform1 `json:"platform,omitempty"`
+	SchemaVersion int    `json:"schemaVersion"`
+	MediaType     string `json:"mediaType"`
+	Config        struct {
+		MediaType string `json:"mediaType"`
+		Size      int    `json:"size"`
+		Digest    string `json:"digest"`
+	} `json:"config"`
+	Layers []struct {
+		MediaType string `json:"mediaType"`
+		Size      int    `json:"size"`
+		Digest    string `json:"digest"`
+	} `json:"layers"`
 }
 
 type TokenResponse struct {
@@ -186,32 +172,6 @@ func parseImage(image string) (string, string) {
 	return imageParts[0], imageParts[1]
 }
 
-func verifyTarFile(tarFile string) error {
-	file, err := os.Open(tarFile)
-	if err != nil {
-		return fmt.Errorf("Error opening tar file: %v", err)
-	}
-	defer file.Close()
-
-	tarReader := tar.NewReader(file)
-
-	for {
-		header, err := tarReader.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("Error reading tar header: %v", err)
-		}
-
-		if header.Typeflag != tar.TypeDir && header.Typeflag != tar.TypeReg {
-			return fmt.Errorf("Invalid file type in tar file: %v", header.Typeflag)
-		}
-	}
-
-	return nil
-}
-
 // Usage: your_docker.sh run <image> <command> <arg1> <arg2> ...
 func main() {
 	command := os.Args[3]
@@ -244,7 +204,7 @@ func main() {
 	// pull layer
 	layerNames := []string{}
 
-	for _, manifest := range manifest.Manifests {
+	for _, manifest := range manifest.Layers {
 		layerName, err := pullLayer(token, image, manifest.Digest)
 		if err != nil {
 			fmt.Printf("Error pulling layer: %v\n", err)
@@ -254,11 +214,6 @@ func main() {
 	}
 	// extract layer
 	for _, layerName := range layerNames {
-		err := verifyTarFile(layerName)
-		if err != nil {
-			fmt.Printf("Error verifying tar file: %v\n", err)
-			os.Exit(1)
-		}
 		err = extractTar(layerName, tempDir)
 		if err != nil {
 			fmt.Printf("Error extracting layer: %v\n", err)
