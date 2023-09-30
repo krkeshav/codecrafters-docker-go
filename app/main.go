@@ -201,9 +201,9 @@ func main() {
 		fmt.Printf("Error getting manifest: %v\n", err)
 		os.Exit(1)
 	}
-	// pull layer
-	layerNames := []string{}
 
+	// pull layers
+	layerNames := []string{}
 	for _, manifest := range manifest.Layers {
 		layerName, err := pullLayer(token, image, manifest.Digest)
 		if err != nil {
@@ -212,7 +212,8 @@ func main() {
 		}
 		layerNames = append(layerNames, layerName)
 	}
-	// extract layer
+
+	// extract layers
 	for _, layerName := range layerNames {
 		err = extractTar(layerName, tempDir)
 		if err != nil {
@@ -220,6 +221,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
+
 	// isolate file system
 	err = isolateFileSystem(tempDir)
 	if err != nil {
@@ -256,6 +258,7 @@ func main() {
 
 }
 
+// This function isolates the process by creating new namespaces
 func isolateProcess() error {
 	// adding addtional namespace i.e., pid namespace, UTS namespace, mount namespace for more isolation
 	if syscall.Unshare(syscall.CLONE_NEWUTS|syscall.CLONE_NEWPID|syscall.CLONE_NEWNS) != nil {
@@ -264,6 +267,7 @@ func isolateProcess() error {
 	return nil
 }
 
+// This was for final stage where we only needed to do chroot into directory
 func isolateFileSystem(tempDir string) error {
 	// now we chroot into the temporary directory
 	err := syscall.Chroot(tempDir)
@@ -274,7 +278,9 @@ func isolateFileSystem(tempDir string) error {
 	return nil
 }
 
-// This is for previous stages of the project
+// This is for previous stages of the project where isolated binary was required since
+// we were not pulling any image from docker hub, in final stage we are pulling image
+// so we use only chroot
 func isolateFileSystemWithBinary(tempDir, binaryPath string) error {
 	// now we copy the binary to the temporary directory
 	destinationPath := filepath.Join(tempDir, binaryPath)
